@@ -7,18 +7,15 @@ import "@openzeppelin/contracts-upgradeable/utils/math/SafeMathUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/token/ERC20/utils/SafeERC20Upgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import "hardhat/console.sol";
-
-// // Inheritance
-// import "./interfaces/IStakingRewards.sol";
-// import "./RewardsDistributionRecipient.sol";
 
 contract StakingRewards is  ReentrancyGuardUpgradeable,OwnableUpgradeable {
     using SafeMathUpgradeable for uint256;
     using SafeERC20Upgradeable for IERC20Upgradeable;
 
     /* ========== STATE VARIABLES ========== */
+    IERC20Upgradeable public rewardsToken;
     IERC20Upgradeable public stakingToken;
+
     uint256 public periodFinish;
     uint256 public rewardRate;
     uint256 public rewardsDuration;
@@ -27,18 +24,20 @@ contract StakingRewards is  ReentrancyGuardUpgradeable,OwnableUpgradeable {
     uint256 public totalFees;
     uint256 public holdingTime;
 
-    address private community;
+    address public community;
 
     mapping(address => uint256) public userRewardPerTokenPaid;
     mapping(address => uint256) public rewards;
     mapping(address => uint256) public userLastStackedTime;
+    mapping(address => bool) public isBlackListed;
 
-    uint256 private _totalSupply;
-    mapping(address => uint256) private _balances;
+    uint256 public _totalSupply;
+    mapping(address => uint256) public _balances;
 
     /* ========== Initialize ========== */
 
-    function initialize(address _stakingToken) public initializer{
+    function initialize(address _rewardsToken,address _stakingToken) public initializer{
+         rewardsToken = IERC20Upgradeable(_rewardsToken);
          stakingToken = IERC20Upgradeable(_stakingToken);
          __Ownable_init();
          __ReentrancyGuard_init();
@@ -53,10 +52,18 @@ contract StakingRewards is  ReentrancyGuardUpgradeable,OwnableUpgradeable {
         holdingTime = _holdingTime;
     }
 
+    function updateBlackList(address account, bool excluded) external onlyOwner{
+        isBlackListed[account] = excluded;
+    }
+
     /* ========== VIEWS ========== */
 
     function totalSupply() external view  returns (uint256) {
         return _totalSupply;
+    }
+
+    function isBlackListedAddress(address account) external view  returns (bool) {
+        return isBlackListed[account];
     }
 
     function balanceOf(address account) external view  returns (uint256) {
@@ -88,6 +95,8 @@ contract StakingRewards is  ReentrancyGuardUpgradeable,OwnableUpgradeable {
     /* ========== MUTATIVE FUNCTIONS ========== */
     function stake(uint256 amount) external  nonReentrant updateReward(msg.sender) {
         require(amount > 0, "Cannot stake 0");
+        require(!isBlackListed[msg.sender],"User Blacklisted");
+
         _totalSupply = _totalSupply.add(amount);
         _balances[msg.sender] = _balances[msg.sender].add(amount);
         userLastStackedTime[msg.sender] = block.timestamp;
@@ -101,17 +110,6 @@ contract StakingRewards is  ReentrancyGuardUpgradeable,OwnableUpgradeable {
         _balances[msg.sender] = _balances[msg.sender].sub(amount);
         stakingToken.safeTransfer(msg.sender, _partialFee(msg.sender,amount));
         emit Withdrawn(msg.sender, amount);
-    }
-
-
-    function stakeRewards() external nonReentrant updateReward(msg.sender) {
-        uint256 reward = earned(msg.sender);
-        require(reward > 0, "Cannot stake 0");
-
-        rewards[msg.sender] = 0;   
-        _totalSupply = _totalSupply.add(reward);
-        _balances[msg.sender] = _balances[msg.sender].add(reward);
-        emit Staked(msg.sender, reward);
     }
 
     function _partialFee(address from,uint256 amount) internal returns (uint256) {
@@ -134,7 +132,7 @@ contract StakingRewards is  ReentrancyGuardUpgradeable,OwnableUpgradeable {
         uint256 reward = rewards[msg.sender];
         if (reward > 0) {
             rewards[msg.sender] = 0;
-            stakingToken.safeTransfer(msg.sender, reward);
+            rewardsToken.safeTransfer(msg.sender, reward);
             emit RewardPaid(msg.sender, reward);
         }
     }
@@ -147,7 +145,7 @@ contract StakingRewards is  ReentrancyGuardUpgradeable,OwnableUpgradeable {
     /* ========== RESTRICTED FUNCTIONS ========== */
     function notifyRewardAmount(uint256 reward) external onlyOwner updateReward(address(0)) {
 
-        stakingToken.safeTransferFrom(msg.sender, address(this), reward);
+        rewardsToken.safeTransferFrom(msg.sender, address(this), reward);
 
         if (block.timestamp >= periodFinish) {
             rewardRate = reward.div(rewardsDuration);
@@ -161,7 +159,7 @@ contract StakingRewards is  ReentrancyGuardUpgradeable,OwnableUpgradeable {
         // This keeps the reward rate in the right range, preventing overflows due to
         // very high values of rewardRate in the earned and rewardsPerToken functions;
         // Reward + leftover must be less than 2^256 / 10^18 to avoid overflow.
-        uint balance = stakingToken.balanceOf(address(this)).sub(_totalSupply);
+        uint balance = rewardsToken.balanceOf(address(this));
         require(rewardRate <= balance.div(rewardsDuration), "Provided reward too high");
 
         lastUpdateTime = block.timestamp;
@@ -188,7 +186,6 @@ contract StakingRewards is  ReentrancyGuardUpgradeable,OwnableUpgradeable {
 
     // Added to support recovering LP Rewards from other systems such as BAL to be distributed to holders
     function recoverERC20(address tokenAddress, uint256 tokenAmount) external onlyOwner {
-        require(_totalSupply < IERC20Upgradeable(tokenAddress).balanceOf(address(this)).sub(tokenAmount), "Cannot withdraw staking token");
         IERC20Upgradeable(tokenAddress).safeTransfer(owner(), tokenAmount);
         emit Recovered(tokenAddress, tokenAmount);
     }
@@ -207,7 +204,6 @@ contract StakingRewards is  ReentrancyGuardUpgradeable,OwnableUpgradeable {
     modifier updateReward(address account) {
         rewardPerTokenStored = rewardPerToken();
         lastUpdateTime = lastTimeRewardApplicable();
-        console.log(lastUpdateTime);
         if (account != address(0)) {
             rewards[account] = earned(account);
             userRewardPerTokenPaid[account] = rewardPerTokenStored;
